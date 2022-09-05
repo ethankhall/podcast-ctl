@@ -1,0 +1,18 @@
+title: BagMan
+description: BagMan Dungeons and Dragons Sesion Recording
+subtitle: Will they start a farm?
+summary: Vinvon the Artificer, Wildt the Kenku, Sage the Scolar, and Koscher the Vampire get into some shit.
+explicit: true
+image: https://dnd.sfo2.digitaloceanspaces.com/podcast-test/artifacts/art.jpg
+owner:
+  name: Ethan H
+  email: bagman-podcast@quilee.xyz
+keywords:
+- Dungeons and Dragons
+publishing:
+  region:
+    name: sfo2
+    endpoint: sfo2.digitaloceanspaces.com
+  bucket: dnd
+  prefix: podcast-test
+    
