@@ -52,7 +52,7 @@ pub fn generate_podcast_xml(
                     add_text_element(
                         writer,
                         "itunes:subtitle",
-                        &comrak::markdown_to_html(&channel_details.subtitle, &Default::default()),
+                        &channel_details.subtitle
                     );
                     add_text_element(
                         writer,
@@ -124,6 +124,7 @@ impl XmlOutput for Episode {
             .create_element("item")
             .write_inner_content(|writer| {
                 add_text_element(writer, "title", &self.title);
+                add_text_element(writer, "itunes:subtitle", &self.summary);
                 if let Some(link) = &self.link {
                     add_text_element(writer, "link", &link);
                 }
@@ -149,8 +150,24 @@ impl XmlOutput for Episode {
                 );
                 add_text_element(
                     writer,
+                    "itunes:summary",
+                    &comrak::markdown_to_html(&self.description, &Default::default()),
+                );
+                add_text_element(
+                    writer,
                     "itunes:duration",
                     &format!("{}", self.media.duration),
+                );
+
+                add_text_element(
+                    writer,
+                    "itunes:season",
+                    &format!("{}", self.season),
+                );
+                add_text_element(
+                    writer,
+                    "itunes:episode",
+                    &format!("{}", self.episode_number),
                 );
 
                 let image: &str = &self.image;
@@ -161,14 +178,4 @@ impl XmlOutput for Episode {
             })
             .ok();
     }
-}
-
-#[test]
-fn test_render_xml() {
-    let result = generate_podcast_xml(
-        ChannelDetails::make_test(),
-        vec![Episode::make_test("test")],
-    )
-    .unwrap();
-    assert_eq!("", result);
 }

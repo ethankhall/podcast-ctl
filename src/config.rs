@@ -80,10 +80,12 @@ pub struct OwnerDetails {
 pub struct Episode {
     pub id: String,
     pub title: String,
-    pub description: String,
     pub summary: String,
+    pub description: String,
     pub link: Option<String>,
     pub image: String,
+    pub season: u64,
+    pub episode_number: u64,
     #[serde(with = "ts_seconds")]
     pub released_at: DateTime<Utc>,
     pub media: EpisodeMedia,
@@ -101,6 +103,8 @@ impl Episode {
             link: Some("link".to_owned()),
             image: "image".to_owned(),
             released_at: Utc::now(),
+            season: 1,
+            episode_number: 1,
             media: EpisodeMedia {
                 url: "url".to_owned(),
                 duration: 12,

@@ -4,13 +4,15 @@ mod xml;
 
 use clap::{Parser, Subcommand};
 use config::*;
-use log::info;
+use log::{info, debug};
 use std::fs;
 use std::io::Cursor;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::fs::File as TokioFile;
 use uuid::Uuid;
+use chrono::{Utc, DateTime, NaiveDate};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -24,16 +26,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Upload an mp3 to S3 storage
-    UploadEpisodeRecording(UploadEpisodeRecording),
     /// Generate episode config
     CreateEpisode(NewEpisode),
     /// Render XML that would be uploaded to S3 storage
-    RenderChannelXml(RenderOptions),
+    RenderChannel(RenderOptions),
 }
 
 #[derive(Parser)]
 struct RenderOptions {
+    /// When set, the xml file will be uploaded instead of written to stdout
     #[clap(long, short, action)]
     upload: bool,
 }
@@ -45,20 +46,10 @@ struct NewEpisode {
     file: PathBuf,
     /// URL for the episode
     #[clap(short, long)]
-    url: String,
+    date: String,
     /// Episode Name
     #[clap(short, long)]
-    name: String,
-}
-
-#[derive(Parser)]
-struct UploadEpisodeRecording {
-    /// mp3 file for the episode
-    #[clap(value_parser)]
-    file: PathBuf,
-    /// Episode Name
-    #[clap(short, long)]
-    name: String,
+    title: String,
 }
 
 #[derive(Error, Debug)]
@@ -73,6 +64,8 @@ pub enum CliError {
     S3UploadError(#[from] rusoto_core::RusotoError<rusoto_s3::PutObjectError>),
     #[error("Error processing MP3 {0}")]
     Mp3Error(String),
+    #[error(transparent)]
+    ChronoError(#[from] chrono::ParseError),
     #[error("unknown data store error")]
     Unknown,
 }
@@ -106,8 +99,7 @@ async fn parsed_main(
     commands: Commands,
 ) -> Result<(), CliError> {
     match commands {
-        Commands::UploadEpisodeRecording(data) => upload_episode(channel_config, data).await,
-        Commands::RenderChannelXml(data) => render_xml(episode_dir, channel_config, data).await,
+        Commands::RenderChannel(data) => render_xml(episode_dir, channel_config, data).await,
         Commands::CreateEpisode(data) => create_episode(episode_dir, channel_config, data).await,
     }
 }
@@ -117,52 +109,19 @@ async fn create_episode(
     channel_config: ChannelConfig,
     data: NewEpisode,
 ) -> Result<(), CliError> {
-    let metadata = match mp3_metadata::read_from_file(&data.file) {
-        Err(e) => return Err(CliError::Mp3Error(format!("{}", e))),
-        Ok(metadata) => metadata,
-    };
-    let duraction = metadata.duration;
 
-    let metadata = fs::metadata(data.file)?;
+    let publish_date = NaiveDate::parse_from_str(&data.date, "%Y-%m-%d")?;
+    let publish_date: DateTime<Utc> = DateTime::from_utc(publish_date.and_hms(0,0,0), Utc);
+    let publish_name = publish_date.format("%Y-%m-%d").to_string();
 
-    let episode = Episode {
-        id: Uuid::new_v4().to_string(),
-        title: data.name.clone(),
-        description: "Fill me in".into(),
-        summary: "Fill me in".into(),
-        link: Some("Fill me in, or delete me".into()),
-        released_at: chrono::Utc::now(),
-        image: "http://google.com".to_owned(),
-        media: EpisodeMedia {
-            url: data.url,
-            duration: duraction.as_secs(),
-            bytes: metadata.len(),
-        },
-        keywords: channel_config.channel.keywords.clone(),
-    };
-
-    info!("episode {:?}", episode);
-
-    let yaml = serde_yaml::to_string(&episode)?;
-
-    let mut episode_file = episode_dir.clone();
-    episode_file.push(format!("{}.yaml", data.name));
-
-    fs::write(episode_file, yaml)?;
-
-    Ok(())
-}
-
-async fn upload_episode(
-    channel_config: ChannelConfig,
-    data: UploadEpisodeRecording,
-) -> Result<(), CliError> {
     let object_key = format!(
         "{}/artifacts/{}.mp3",
-        channel_config.publishing.prefix, data.name
+        channel_config.publishing.prefix, publish_name
     );
-    let file = TokioFile::open(data.file).await?;
-    let size = file.metadata().await?.len();
+
+    let file = TokioFile::open(&data.file).await?;
+    let file_metadata = file.metadata().await?;
+    let size = file_metadata.len();
 
     let upload_url = upload::upload_contents(
         file,
@@ -174,7 +133,81 @@ async fn upload_episode(
     .await?;
     println!("Uploaded file {}", upload_url);
 
+    let metadata = match mp3_metadata::read_from_file(&data.file) {
+        Err(e) => return Err(CliError::Mp3Error(format!("{}", e))),
+        Ok(metadata) => metadata,
+    };
+    let duraction = metadata.duration;
+
+    let mut episode = Episode {
+        id: Uuid::new_v4().to_string(),
+        title: data.title.clone(),
+        description: "Fill me in".into(),
+        summary: "Fill me in".into(),
+        link: Some("Fill me in, or delete me".into()),
+        released_at: publish_date,
+        season: 1,
+        episode_number: 0,
+        image: channel_config.channel.image.clone(),
+        media: EpisodeMedia {
+            url: upload_url,
+            duration: duraction.as_secs(),
+            bytes: size,
+        },
+        keywords: channel_config.channel.keywords.clone(),
+    };
+
+    update_episode_numbers(&mut episode, &episode_dir)?;
+
+    info!("episode {:?}", episode);
+
+    let yaml = serde_yaml::to_string(&episode)?;
+
+    let mut episode_file = episode_dir.clone();
+    episode_file.push(format!("{}-session.yaml", publish_name));
+
+    fs::write(episode_file, yaml)?;
+
     Ok(())
+}
+
+fn update_episode_numbers(episode: &mut Episode, episode_dir: &PathBuf) -> Result<(), CliError> {
+    let episodes: Vec<Episode> = get_all_episodes(episode_dir)?;
+
+    let mut season_number = 0;
+    let mut episode_number = 0;
+
+    for episode in episodes {
+        if season_number <= episode.season {
+            season_number = episode.season;
+
+            if episode_number <= episode.episode_number {
+                episode_number = episode.episode_number;
+            }
+        }
+    }
+
+    episode.season  = season_number;
+    episode.episode_number = episode_number + 1; 
+
+    Ok(())
+}
+
+fn get_all_episodes(episode_dir: &PathBuf) -> Result<Vec<Episode>, CliError> {
+    let paths = fs::read_dir(episode_dir)?;
+    let mut episodes: Vec<Episode> = Vec::new();
+
+    for path in paths {
+        let path = path?.path();
+        if path.extension() == Some(OsStr::new("yaml")) {
+            debug!("Found episode {:?}", path);
+            let text = fs::read_to_string(path)?;
+            let episode: Episode = serde_yaml::from_str(&text)?;
+            episodes.push(episode);
+        }
+    }
+
+    Ok(episodes)
 }
 
 async fn render_xml(
@@ -182,18 +215,11 @@ async fn render_xml(
     channel_config: ChannelConfig,
     render_options: RenderOptions,
 ) -> Result<(), CliError> {
-    let paths = fs::read_dir(episode_dir)?;
-    let mut episodes: Vec<Episode> = Vec::new();
+    let episodes: Vec<Episode> = get_all_episodes(&episode_dir)?;
 
-    for path in paths {
-        let text = fs::read_to_string(path?.path())?;
-        let episode: Episode = serde_yaml::from_str(&text)?;
-        episodes.push(episode);
-    }
+    debug!("List episodes {:?}", episodes);
 
     let rendered_podcast = xml::generate_podcast_xml(channel_config.channel, episodes)?;
-
-    println!("{}", rendered_podcast);
 
     if render_options.upload {
         let object_key = format!("{}/podcast.xml", channel_config.publishing.prefix);
@@ -209,6 +235,8 @@ async fn render_xml(
         .await?;
 
         println!("Podcast URL: {}", url);
+    } else {
+        println!("{}", rendered_podcast);
     }
 
     Ok(())

@@ -4,6 +4,8 @@ description: The party finally gets to the Bleeding Citadel
 summary: Koshar gets burnt
 image: https://dnd.sfo2.digitaloceanspaces.com/podcast-test/artifacts/art.jpg
 releasedAt: 1662339408
+season: 2
+episodeNumber: 40
 media:
   url: https://dnd.sfo2.digitaloceanspaces.com/podcast-test/artifacts/2022-09-01-session.mp3
   duration: 6305
